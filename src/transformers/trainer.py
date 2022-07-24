@@ -877,7 +877,7 @@ class Trainer:
             worker_init_fn=seed_worker,
         )
 
-    def _get_eval_sampler(self, eval_dataset: Dataset) -> Optional[torch.utils.data.Sampler]:
+    def _get_eval_sampler(self, per_device_eval_batch_size:int,eval_dataset: Dataset) -> Optional[torch.utils.data.Sampler]:
         # Deprecated code
         if self.args.use_legacy_prediction_loop:
             if is_torch_tpu_available():
@@ -889,7 +889,7 @@ class Trainer:
                     eval_dataset,
                     num_replicas=smp.dp_size(),
                     rank=smp.dp_rank(),
-                    batch_size=self.args.per_device_eval_batch_size,
+                    batch_size=per_device_eval_batch_size,
                 )
             elif self.args.local_rank != -1:
                 return SequentialDistributedSampler(eval_dataset)
@@ -901,12 +901,12 @@ class Trainer:
         else:
             return ShardSampler(
                 eval_dataset,
-                batch_size=self.args.per_device_eval_batch_size,
+                batch_size=per_device_eval_batch_size,
                 num_processes=self.args.world_size,
                 process_index=self.args.process_index,
             )
 
-    def get_eval_dataloader(self, eval_dataset: Optional[Dataset] = None) -> DataLoader:
+    def get_eval_dataloader(self, per_device_eval_batch_size:int , eval_dataset: Optional[Dataset] = None) -> DataLoader:
         """
         Returns the evaluation [`~torch.utils.data.DataLoader`].
 
@@ -931,25 +931,27 @@ class Trainer:
             if self.args.world_size > 1:
                 eval_dataset = IterableDatasetShard(
                     eval_dataset,
-                    batch_size=self.args.per_device_eval_batch_size,
+                    batch_size=per_device_eval_batch_size,
                     drop_last=self.args.dataloader_drop_last,
                     num_processes=self.args.world_size,
                     process_index=self.args.process_index,
                 )
             return DataLoader(
                 eval_dataset,
-                batch_size=self.args.eval_batch_size,
+                #batch_size=self.args.eval_batch_size,
+                batch_size=per_device_eval_batch_size,
                 collate_fn=data_collator,
                 num_workers=self.args.dataloader_num_workers,
                 pin_memory=self.args.dataloader_pin_memory,
             )
 
-        eval_sampler = self._get_eval_sampler(eval_dataset)
+        eval_sampler = self._get_eval_sampler(per_device_eval_batch_size=per_device_eval_batch_size,eval_dataset=eval_dataset)
 
         return DataLoader(
             eval_dataset,
             sampler=eval_sampler,
-            batch_size=self.args.eval_batch_size,
+            #batch_size=self.args.eval_batch_size,
+            batch_size=per_device_eval_batch_size,
             collate_fn=data_collator,
             drop_last=self.args.dataloader_drop_last,
             num_workers=self.args.dataloader_num_workers,
@@ -1861,7 +1863,11 @@ class Trainer:
 
         # add remaining tr_loss
         self._total_loss_scalar += tr_loss.item()
-        train_loss = self._total_loss_scalar / self.state.global_step
+
+        if (self.state.global_step == 0.0):
+            train_loss = 0.0
+        else:    
+            train_loss = self._total_loss_scalar / self.state.global_step
 
         metrics = speed_metrics("train", start_time, num_samples=num_train_samples, num_steps=self.state.max_steps)
         self.store_flos()
@@ -2720,9 +2726,10 @@ class Trainer:
 
     def evaluate(
         self,
+        per_device_eval_batch_size: int,
         eval_dataset: Optional[Dataset] = None,
         ignore_keys: Optional[List[str]] = None,
-        metric_key_prefix: str = "eval",
+        metric_key_prefix: str = "eval"
     ) -> Dict[str, float]:
         """
         Run evaluation and returns metrics.
@@ -2751,7 +2758,7 @@ class Trainer:
         # memory metrics - must set up as early as possible
         self._memory_tracker.start()
 
-        eval_dataloader = self.get_eval_dataloader(eval_dataset)
+        eval_dataloader = self.get_eval_dataloader(per_device_eval_batch_size=per_device_eval_batch_size, eval_dataset=eval_dataset)
         start_time = time.time()
 
         eval_loop = self.prediction_loop if self.args.use_legacy_prediction_loop else self.evaluation_loop
@@ -2763,6 +2770,7 @@ class Trainer:
             prediction_loss_only=True if self.compute_metrics is None else None,
             ignore_keys=ignore_keys,
             metric_key_prefix=metric_key_prefix,
+            per_device_eval_batch_size=per_device_eval_batch_size
         )
 
         total_batch_size = self.args.eval_batch_size * self.args.world_size
@@ -2854,6 +2862,7 @@ class Trainer:
         prediction_loss_only: Optional[bool] = None,
         ignore_keys: Optional[List[str]] = None,
         metric_key_prefix: str = "eval",
+        per_device_eval_batch_size = 0
     ) -> EvalLoopOutput:
         """
         Prediction/evaluation loop, shared by `Trainer.evaluate()` and `Trainer.predict()`.
@@ -2885,8 +2894,11 @@ class Trainer:
                 model = model.to(dtype=torch.float16, device=args.device)
             elif args.bf16_full_eval:
                 model = model.to(dtype=torch.bfloat16, device=args.device)
-
-        batch_size = self.args.eval_batch_size
+        
+        if (per_device_eval_batch_size == 0) :
+            batch_size = self.args.eval_batch_size
+        else :
+            batch_size = per_device_eval_batch_size
 
         logger.info(f"***** Running {description} *****")
         if has_length(dataloader):
@@ -2923,14 +2935,13 @@ class Trainer:
 
         observed_num_examples = 0
         # Main evaluation loop
+        #b = [1,2,4,8,16,32,64,128,128]
+        
         for step, inputs in enumerate(dataloader):
+            #print(dataloader)
             # Update the observed num examples
-            observed_batch_size = find_batch_size(inputs)
-            if observed_batch_size is not None:
-                observed_num_examples += observed_batch_size
-                # For batch samplers, batch_size is not known by the dataloader in advance.
-                if batch_size is None:
-                    batch_size = observed_batch_size
+            #print (step)
+            #observed_batch_size = b[step % 8]
 
             # Prediction step
             loss, logits, labels = self.prediction_step(model, inputs, prediction_loss_only, ignore_keys=ignore_keys)

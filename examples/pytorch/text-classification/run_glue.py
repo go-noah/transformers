@@ -44,8 +44,6 @@ from transformers import (
 from transformers.trainer_utils import get_last_checkpoint
 from transformers.utils import check_min_version, send_example_telemetry
 from transformers.utils.versions import require_version
-
-
 # Will error if the minimal version of Transformers is not installed. Remove at your own risks.
 check_min_version("4.21.0.dev0")
 
@@ -241,6 +239,7 @@ def main():
     logger.info(f"Training/evaluation parameters {training_args}")
 
     # Detecting last checkpoint.
+    
     last_checkpoint = None
     if os.path.isdir(training_args.output_dir) and training_args.do_train and not training_args.overwrite_output_dir:
         last_checkpoint = get_last_checkpoint(training_args.output_dir)
@@ -543,29 +542,30 @@ def main():
     if training_args.do_eval:
         logger.info("*** Evaluate ***")
 
-        # Loop to handle MNLI double evaluation (matched, mis-matched)
-        tasks = [data_args.task_name]
-        eval_datasets = [eval_dataset]
-        if data_args.task_name == "mnli":
-            tasks.append("mnli-mm")
-            eval_datasets.append(raw_datasets["validation_mismatched"])
-            combined = {}
+        for eval_batch_size in (1,2,4,8,16,32,64,128):
+            # Loop to handle MNLI double evaluation (matched, mis-matched)
+            tasks = [data_args.task_name]
+            eval_datasets = [eval_dataset]
+            if data_args.task_name == "mnli":
+                tasks.append("mnli-mm")
+                eval_datasets.append(raw_datasets["validation_mismatched"])
+                combined = {}
 
-        for eval_dataset, task in zip(eval_datasets, tasks):
-            metrics = trainer.evaluate(eval_dataset=eval_dataset)
+            for eval_dataset, task in zip(eval_datasets, tasks):
+                metrics = trainer.evaluate(per_device_eval_batch_size=eval_batch_size,eval_dataset=eval_dataset)
 
-            max_eval_samples = (
-                data_args.max_eval_samples if data_args.max_eval_samples is not None else len(eval_dataset)
-            )
-            metrics["eval_samples"] = min(max_eval_samples, len(eval_dataset))
+                max_eval_samples = (
+                    data_args.max_eval_samples if data_args.max_eval_samples is not None else len(eval_dataset)
+                )
+                metrics["eval_samples"] = min(max_eval_samples, len(eval_dataset))
 
-            if task == "mnli-mm":
-                metrics = {k + "_mm": v for k, v in metrics.items()}
-            if task is not None and "mnli" in task:
-                combined.update(metrics)
+                if task == "mnli-mm":
+                    metrics = {k + "_mm": v for k, v in metrics.items()}
+                if task is not None and "mnli" in task:
+                    combined.update(metrics)
 
-            trainer.log_metrics("eval", metrics)
-            trainer.save_metrics("eval", combined if task is not None and "mnli" in task else metrics)
+                trainer.log_metrics("eval", metrics)
+                trainer.save_metrics("eval", combined if task is not None and "mnli" in task else metrics)
 
     if training_args.do_predict:
         logger.info("*** Predict ***")
